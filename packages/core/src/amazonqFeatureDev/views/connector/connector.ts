@@ -7,9 +7,9 @@ import { AuthFollowUpType } from '../../../amazonq/auth/model'
 import { MessagePublisher } from '../../../amazonq/messages/messagePublisher'
 import { CodeReference } from '../../../amazonq/webview/ui/connector'
 import { featureDevChat, licenseText } from '../../constants'
-import { ChatItemType } from '../../models'
 import { ChatItemAction, SourceLink } from '@aws/mynah-ui'
 import { DeletedFileInfo, NewFileInfo } from '../../types'
+import { ChatItemType } from '../../../amazonq/commons/model'
 
 class UiMessage {
     readonly time: number = Date.now()
@@ -52,8 +52,8 @@ export class CodeResultMessage extends UiMessage {
     ) {
         super(tabID)
         this.references = references
-            .filter(ref => ref.licenseName && ref.repository && ref.url)
-            .map(ref => {
+            .filter((ref) => ref.licenseName && ref.repository && ref.url)
+            .map((ref) => {
                 return {
                     information: licenseText(ref),
 

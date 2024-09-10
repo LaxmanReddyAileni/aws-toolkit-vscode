@@ -5,7 +5,7 @@
 
 import AdmZip from 'adm-zip'
 import os from 'os'
-import fs from 'fs-extra'
+import fs from 'fs'
 import { parsePatch, applyPatches, ParsedDiff } from 'diff'
 import path from 'path'
 import vscode from 'vscode'
@@ -20,6 +20,8 @@ import { MetadataResult } from '../../../shared/telemetry/telemetryClient'
 import * as CodeWhispererConstants from '../../models/constants'
 import { createCodeWhispererChatStreamingClient } from '../../../shared/clients/codewhispererChatClient'
 import { ChatSessionManager } from '../../../amazonqGumby/chat/storages/chatSession'
+import { setContext } from '../../../shared/vscode/setContext'
+import globals from '../../../shared/extensionGlobals'
 
 export abstract class ProposedChangeNode {
     abstract readonly resourcePath: string
@@ -124,10 +126,10 @@ export class DiffModel {
     public copyProject(pathToWorkspace: string, changedFiles: ParsedDiff[]) {
         const pathToTmpSrcDir = path.join(os.tmpdir(), `project-copy-${Date.now()}`)
         fs.mkdirSync(pathToTmpSrcDir)
-        changedFiles.forEach(file => {
+        changedFiles.forEach((file) => {
             const pathToTmpFile = path.join(pathToTmpSrcDir, file.oldFileName!.substring(2))
             // use mkdirsSync to create parent directories in pathToTmpFile too
-            fs.mkdirsSync(path.dirname(pathToTmpFile))
+            fs.mkdirSync(path.dirname(pathToTmpFile), { recursive: true })
             const pathToOldFile = path.join(pathToWorkspace, file.oldFileName!.substring(2))
             // pathToOldFile will not exist for new files such as summary.md
             if (fs.existsSync(pathToOldFile)) {
@@ -177,7 +179,7 @@ export class DiffModel {
                 }
             },
         })
-        this.changes = changedFiles.flatMap(file => {
+        this.changes = changedFiles.flatMap((file) => {
             /* ex. file.oldFileName = 'a/src/java/com/project/component/MyFile.java'
              * ex. file.newFileName = 'b/src/java/com/project/component/MyFile.java'
              * use substring(2) to ignore the 'a/' and 'b/'
@@ -208,7 +210,7 @@ export class DiffModel {
     }
 
     public saveChanges() {
-        this.changes.forEach(file => {
+        this.changes.forEach((file) => {
             file.saveChange()
         })
 
@@ -267,8 +269,8 @@ export class ProposedTransformationExplorer {
         })
 
         const reset = async () => {
-            await vscode.commands.executeCommand('setContext', 'gumby.transformationProposalReviewInProgress', false)
-            await vscode.commands.executeCommand('setContext', 'gumby.reviewState', TransformByQReviewStatus.NotStarted)
+            await setContext('gumby.transformationProposalReviewInProgress', false)
+            await setContext('gumby.reviewState', TransformByQReviewStatus.NotStarted)
 
             // delete result archive after changes cleared; summary is under ResultArchiveFilePath
             if (fs.existsSync(transformByQState.getResultArchiveFilePath())) {
@@ -292,7 +294,7 @@ export class ProposedTransformationExplorer {
         vscode.commands.registerCommand('aws.amazonq.transformationHub.reviewChanges.reset', async () => await reset())
 
         vscode.commands.registerCommand('aws.amazonq.transformationHub.reviewChanges.reveal', async () => {
-            await vscode.commands.executeCommand('setContext', 'gumby.transformationProposalReviewInProgress', true)
+            await setContext('gumby.transformationProposalReviewInProgress', true)
             const root = diffModel.getRoot()
             if (root) {
                 await this.changeViewer.reveal(root, {
@@ -312,30 +314,39 @@ export class ProposedTransformationExplorer {
         })
 
         vscode.commands.registerCommand('aws.amazonq.transformationHub.reviewChanges.startReview', async () => {
-            await vscode.commands.executeCommand(
-                'setContext',
-                'gumby.reviewState',
-                TransformByQReviewStatus.PreparingReview
-            )
+            await setContext('gumby.reviewState', TransformByQReviewStatus.PreparingReview)
 
             const pathToArchive = path.join(
                 ProposedTransformationExplorer.TmpDir,
                 transformByQState.getJobId(),
                 'ExportResultsArchive.zip'
             )
-
+            let exportResultsArchiveSize = 0
             let downloadErrorMessage = undefined
 
             const cwStreamingClient = await createCodeWhispererChatStreamingClient()
             try {
-                await downloadExportResultArchive(
-                    cwStreamingClient,
-                    {
-                        exportId: transformByQState.getJobId(),
-                        exportIntent: ExportIntent.TRANSFORMATION,
-                    },
-                    pathToArchive
-                )
+                await telemetry.codeTransform_downloadArtifact.run(async () => {
+                    telemetry.record({
+                        codeTransformArtifactType: 'ClientInstructions',
+                        codeTransformSessionId: CodeTransformTelemetryState.instance.getSessionId(),
+                        codeTransformJobId: transformByQState.getJobId(),
+                    })
+
+                    await downloadExportResultArchive(
+                        cwStreamingClient,
+                        {
+                            exportId: transformByQState.getJobId(),
+                            exportIntent: ExportIntent.TRANSFORMATION,
+                        },
+                        pathToArchive
+                    )
+
+                    // Update downloaded artifact size
+                    exportResultsArchiveSize = (await fs.promises.stat(pathToArchive)).size
+
+                    telemetry.record({ codeTransformTotalByteSize: exportResultsArchiveSize })
+                })
             } catch (e: any) {
                 // user can retry the download
                 downloadErrorMessage = (e as Error).message
@@ -349,24 +360,12 @@ export class ProposedTransformationExplorer {
                     message: `${CodeWhispererConstants.errorDownloadingDiffChatMessage} The download failed due to: ${downloadErrorMessage}`,
                     tabID: ChatSessionManager.Instance.getSession().tabID,
                 })
-                await vscode.commands.executeCommand(
-                    'setContext',
-                    'gumby.reviewState',
-                    TransformByQReviewStatus.NotStarted
-                )
+                await setContext('gumby.reviewState', TransformByQReviewStatus.NotStarted)
                 getLogger().error(`CodeTransformation: ExportResultArchive error = ${downloadErrorMessage}`)
-                telemetry.codeTransform_logApiError.emit({
-                    codeTransformApiNames: 'ExportResultArchive',
-                    codeTransformSessionId: CodeTransformTelemetryState.instance.getSessionId(),
-                    codeTransformJobId: transformByQState.getJobId(),
-                    codeTransformApiErrorMessage: downloadErrorMessage,
-                    codeTransformRequestId: e.requestId ?? '',
-                    result: MetadataResult.Fail,
-                    reason: 'ExportResultArchiveFailed',
-                })
                 throw new Error('Error downloading diff')
             } finally {
                 // This metric is emitted when user clicks Download Proposed Changes button
+                // TODO: remove deprecated metric once BI started using new metrics
                 telemetry.codeTransform_vcsViewerClicked.emit({
                     codeTransformVCSViewerSrcComponents: 'toastNotification',
                     codeTransformSessionId: CodeTransformTelemetryState.instance.getSessionId(),
@@ -377,10 +376,8 @@ export class ProposedTransformationExplorer {
                 cwStreamingClient.destroy()
             }
 
-            const exportResultsArchiveSize = (await fs.promises.stat(pathToArchive)).size
-
             let deserializeErrorMessage = undefined
-            const deserializeArchiveStartTime = Date.now()
+            const deserializeArchiveStartTime = globals.clock.Date.now()
             let pathContainingArchive = ''
             try {
                 // Download and deserialize the zip
@@ -391,19 +388,16 @@ export class ProposedTransformationExplorer {
                     path.join(pathContainingArchive, ExportResultArchiveStructure.PathToDiffPatch),
                     transformByQState.getProjectPath()
                 )
-                await vscode.commands.executeCommand(
-                    'setContext',
-                    'gumby.reviewState',
-                    TransformByQReviewStatus.InReview
-                )
+                await setContext('gumby.reviewState', TransformByQReviewStatus.InReview)
                 transformDataProvider.refresh()
                 transformByQState.setSummaryFilePath(
                     path.join(pathContainingArchive, ExportResultArchiveStructure.PathToSummary)
                 )
                 transformByQState.setResultArchiveFilePath(pathContainingArchive)
-                await vscode.commands.executeCommand('setContext', 'gumby.isSummaryAvailable', true)
+                await setContext('gumby.isSummaryAvailable', true)
 
                 // This metric is only emitted when placed before showInformationMessage
+                // TODO: remove deprecated metric once BI started using new metrics
                 telemetry.codeTransform_vcsDiffViewerVisible.emit({
                     codeTransformSessionId: CodeTransformTelemetryState.instance.getSessionId(),
                     codeTransformJobId: transformByQState.getJobId(),
@@ -428,6 +422,7 @@ export class ProposedTransformationExplorer {
                     `${CodeWhispererConstants.errorDeserializingDiffNotification} ${deserializeErrorMessage}`
                 )
             } finally {
+                // TODO: remove deprecated metric once BI started using new metrics
                 telemetry.codeTransform_jobArtifactDownloadAndDeserializeTime.emit({
                     codeTransformSessionId: CodeTransformTelemetryState.instance.getSessionId(),
                     codeTransformJobId: transformByQState.getJobId(),
@@ -449,6 +444,18 @@ export class ProposedTransformationExplorer {
                 tabID: ChatSessionManager.Instance.getSession().tabID,
             })
             await reset()
+
+            telemetry.codeTransform_viewArtifact.emit({
+                codeTransformArtifactType: 'ClientInstructions',
+                codeTransformVCSViewerSrcComponents: 'toastNotification',
+                codeTransformSessionId: CodeTransformTelemetryState.instance.getSessionId(),
+                codeTransformJobId: transformByQState.getJobId(),
+                codeTransformStatus: transformByQState.getStatus(),
+                userChoice: 'Submit',
+                result: MetadataResult.Pass,
+            })
+
+            // TODO: remove deprecated metric once BI started using new metrics
             telemetry.codeTransform_vcsViewerSubmitted.emit({
                 codeTransformSessionId: CodeTransformTelemetryState.instance.getSessionId(),
                 codeTransformJobId: transformByQState.getJobId(),
@@ -461,6 +468,18 @@ export class ProposedTransformationExplorer {
             diffModel.rejectChanges()
             await reset()
             telemetry.ui_click.emit({ elementId: 'transformationHub_rejectChanges' })
+
+            telemetry.codeTransform_viewArtifact.emit({
+                codeTransformArtifactType: 'ClientInstructions',
+                codeTransformVCSViewerSrcComponents: 'toastNotification',
+                codeTransformSessionId: CodeTransformTelemetryState.instance.getSessionId(),
+                codeTransformJobId: transformByQState.getJobId(),
+                codeTransformStatus: transformByQState.getStatus(),
+                userChoice: 'Cancel',
+                result: MetadataResult.Pass,
+            })
+
+            // TODO: remove deprecated metric once BI started using new metrics
             telemetry.codeTransform_vcsViewerCanceled.emit({
                 // eslint-disable-next-line id-length
                 codeTransformPatchViewerCancelSrcComponents: 'cancelButton',

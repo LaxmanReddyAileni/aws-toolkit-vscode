@@ -13,10 +13,17 @@ import { telemetry } from '../../shared/telemetry/telemetry'
 import { VirtualFileSystem } from '../../shared/virtualFilesystem'
 import { VirtualMemoryFile } from '../../shared/virtualMemoryFile'
 import { featureDevScheme } from '../constants'
-import { IllegalStateTransition, UserMessageNotFoundError } from '../errors'
 import {
+    FeatureDevServiceError,
+    IllegalStateTransition,
+    PromptRefusalException,
+    UserMessageNotFoundError,
+} from '../errors'
+import {
+    CodeGenerationStatus,
     CurrentWsFolders,
     DeletedFileInfo,
+    DevPhase,
     FollowUpTypes,
     NewFileInfo,
     NewFileZipContents,
@@ -33,14 +40,19 @@ import { CodeReference } from '../../amazonq/webview/ui/connector'
 import { isPresent } from '../../shared/utilities/collectionUtils'
 import { encodeHTML } from '../../shared/utilities/textUtilities'
 import { AuthUtil } from '../../codewhisperer/util/authUtil'
-import { randomUUID } from '../../common/crypto'
+import { randomUUID } from '../../shared/crypto'
 import { collectFiles, getWorkspaceFoldersByPrefixes } from '../../shared/utilities/workspaceUtils'
+import { i18n } from '../../shared/i18n-helper'
+import { Messenger } from '../controllers/chat/messenger/messenger'
 
 export class ConversationNotStartedState implements Omit<SessionState, 'uploadId'> {
     public tokenSource: vscode.CancellationTokenSource
-    public readonly phase = 'Init'
+    public readonly phase = DevPhase.INIT
 
-    constructor(public approach: string, public tabID: string) {
+    constructor(
+        public approach: string,
+        public tabID: string
+    ) {
         this.tokenSource = new vscode.CancellationTokenSource()
         this.approach = ''
     }
@@ -52,8 +64,12 @@ export class ConversationNotStartedState implements Omit<SessionState, 'uploadId
 
 export class PrepareRefinementState implements Omit<SessionState, 'uploadId'> {
     public tokenSource: vscode.CancellationTokenSource
-    public readonly phase = 'Approach'
-    constructor(private config: Omit<SessionStateConfig, 'uploadId'>, public approach: string, public tabID: string) {
+    public readonly phase = DevPhase.APPROACH
+    constructor(
+        private config: Omit<SessionStateConfig, 'uploadId'>,
+        public approach: string,
+        public tabID: string
+    ) {
         this.tokenSource = new vscode.CancellationTokenSource()
     }
 
@@ -62,7 +78,7 @@ export class PrepareRefinementState implements Omit<SessionState, 'uploadId'> {
     }
 
     async interact(action: SessionStateAction): Promise<SessionStateInteraction> {
-        const uploadId = await telemetry.amazonq_createUpload.run(async span => {
+        const uploadId = await telemetry.amazonq_createUpload.run(async (span) => {
             span.record({
                 amazonqConversationId: this.config.conversationId,
                 credentialStartUrl: AuthUtil.instance.startUrl,
@@ -92,7 +108,7 @@ export class RefinementState implements SessionState {
     public tokenSource: vscode.CancellationTokenSource
     public readonly conversationId: string
     public readonly uploadId: string
-    public readonly phase = 'Approach'
+    public readonly phase = DevPhase.APPROACH
 
     constructor(
         private config: SessionStateConfig,
@@ -106,7 +122,7 @@ export class RefinementState implements SessionState {
     }
 
     async interact(action: SessionStateAction): Promise<SessionStateInteraction> {
-        return telemetry.amazonq_approachInvoke.run(async span => {
+        return telemetry.amazonq_approachInvoke.run(async (span) => {
             if (action.msg && action.msg.includes('MOCK CODE')) {
                 return new MockCodeGenState(this.config, this.approach, this.tabID).interact(action)
             }
@@ -127,10 +143,7 @@ export class RefinementState implements SessionState {
                     action.msg
                 )
 
-                this.approach = encodeHTML(
-                    approach ??
-                        'There has been a problem generating an approach. Please open a conversation in a new tab'
-                )
+                this.approach = encodeHTML(approach ?? i18n('AWS.amazonq.featureDev.error.approachNewTab'))
 
                 action.telemetry.recordUserApproachTelemetry(span, this.conversationId, responseType)
                 return {
@@ -194,7 +207,7 @@ function registerNewFiles(
 function getDeletedFileInfos(deletedFiles: string[], workspaceFolders: CurrentWsFolders): DeletedFileInfo[] {
     const workspaceFolderPrefixes = getWorkspaceFoldersByPrefixes(workspaceFolders)
     return deletedFiles
-        .map(deletedFilePath => {
+        .map((deletedFilePath) => {
             const prefix =
                 workspaceFolderPrefixes === undefined
                     ? ''
@@ -219,22 +232,27 @@ abstract class CodeGenBase {
     private pollCount = 180
     private requestDelay = 10000
     readonly tokenSource: vscode.CancellationTokenSource
-    public phase: SessionStatePhase = 'Codegen'
+    public phase: SessionStatePhase = DevPhase.CODEGEN
     public readonly conversationId: string
     public readonly uploadId: string
 
-    constructor(protected config: SessionStateConfig, public tabID: string) {
+    constructor(
+        protected config: SessionStateConfig,
+        public tabID: string
+    ) {
         this.tokenSource = new vscode.CancellationTokenSource()
         this.conversationId = config.conversationId
         this.uploadId = config.uploadId
     }
 
     async generateCode({
+        messenger,
         fs,
         codeGenerationId,
         telemetry: telemetry,
         workspaceFolders,
     }: {
+        messenger: Messenger
         fs: VirtualFileSystem
         codeGenerationId: string
         telemetry: TelemetryHelper
@@ -243,6 +261,8 @@ abstract class CodeGenBase {
         newFiles: NewFileInfo[]
         deletedFiles: DeletedFileInfo[]
         references: CodeReference[]
+        codeGenerationRemainingIterationCount?: number
+        codeGenerationTotalIterationCount?: number
     }> {
         for (
             let pollingIteration = 0;
@@ -250,29 +270,71 @@ abstract class CodeGenBase {
             ++pollingIteration
         ) {
             const codegenResult = await this.config.proxyClient.getCodeGeneration(this.conversationId, codeGenerationId)
+            const codeGenerationRemainingIterationCount = codegenResult.codeGenerationRemainingIterationCount
+            const codeGenerationTotalIterationCount = codegenResult.codeGenerationTotalIterationCount
+
             getLogger().debug(`Codegen response: %O`, codegenResult)
             telemetry.setCodeGenerationResult(codegenResult.codeGenerationStatus.status)
-            switch (codegenResult.codeGenerationStatus.status) {
-                case 'Complete': {
+            switch (codegenResult.codeGenerationStatus.status as CodeGenerationStatus) {
+                case CodeGenerationStatus.COMPLETE: {
                     const { newFileContents, deletedFiles, references } =
                         await this.config.proxyClient.exportResultArchive(this.conversationId)
                     const newFileInfo = registerNewFiles(fs, newFileContents, this.uploadId, workspaceFolders)
                     telemetry.setNumberOfFilesGenerated(newFileInfo.length)
+
                     return {
                         newFiles: newFileInfo,
                         deletedFiles: getDeletedFileInfos(deletedFiles, workspaceFolders),
                         references,
+                        codeGenerationRemainingIterationCount: codeGenerationRemainingIterationCount,
+                        codeGenerationTotalIterationCount: codeGenerationTotalIterationCount,
                     }
                 }
-                case 'predict-ready':
-                case 'InProgress': {
-                    await new Promise(f => globals.clock.setTimeout(f, this.requestDelay))
+                case CodeGenerationStatus.PREDICT_READY:
+                case CodeGenerationStatus.IN_PROGRESS: {
+                    if (codegenResult.codeGenerationStatusDetail) {
+                        messenger.sendAnswer({
+                            message:
+                                i18n('AWS.amazonq.featureDev.pillText.generatingCode') +
+                                `\n\n${codegenResult.codeGenerationStatusDetail}`,
+                            type: 'answer-part',
+                            tabID: this.tabID,
+                        })
+                    }
+                    await new Promise((f) => globals.clock.setTimeout(f, this.requestDelay))
                     break
                 }
-                case 'predict-failed':
-                case 'debate-failed':
-                case 'Failed': {
-                    throw new ToolkitError('Code generation failed', { code: 'CodeGenFailed' })
+                case CodeGenerationStatus.PREDICT_FAILED:
+                case CodeGenerationStatus.DEBATE_FAILED:
+                case CodeGenerationStatus.FAILED: {
+                    switch (true) {
+                        case codegenResult.codeGenerationStatusDetail?.includes('Guardrails'): {
+                            throw new FeatureDevServiceError(
+                                i18n('AWS.amazonq.featureDev.error.codeGen.default'),
+                                'GuardrailsException'
+                            )
+                        }
+                        case codegenResult.codeGenerationStatusDetail?.includes('PromptRefusal'): {
+                            throw new PromptRefusalException()
+                        }
+                        case codegenResult.codeGenerationStatusDetail?.includes('EmptyPatch'): {
+                            throw new FeatureDevServiceError(
+                                i18n('AWS.amazonq.featureDev.error.codeGen.default'),
+                                'EmptyPatchException'
+                            )
+                        }
+                        case codegenResult.codeGenerationStatusDetail?.includes('Throttling'): {
+                            throw new FeatureDevServiceError(
+                                i18n('AWS.amazonq.featureDev.error.throttling'),
+                                'ThrottlingException'
+                            )
+                        }
+                        default: {
+                            throw new ToolkitError(i18n('AWS.amazonq.featureDev.error.codeGen.default'), {
+                                code: 'CodeGenFailed',
+                            })
+                        }
+                    }
                 }
                 default: {
                     const errorMessage = `Unknown status: ${codegenResult.codeGenerationStatus.status}\n`
@@ -282,7 +344,7 @@ abstract class CodeGenBase {
         }
         if (!this.tokenSource.token.isCancellationRequested) {
             // still in progress
-            const errorMessage = 'Code generation did not finish withing the expected time'
+            const errorMessage = i18n('AWS.amazonq.featureDev.error.codeGen.timeout')
             throw new ToolkitError(errorMessage, { code: 'CodeGenTimeout' })
         }
         return {
@@ -301,13 +363,15 @@ export class CodeGenState extends CodeGenBase implements SessionState {
         public deletedFiles: DeletedFileInfo[],
         public references: CodeReference[],
         tabID: string,
-        private currentIteration: number
+        private currentIteration: number,
+        public codeGenerationRemainingIterationCount?: number,
+        public codeGenerationTotalIterationCount?: number
     ) {
         super(config, tabID)
     }
 
     async interact(action: SessionStateAction): Promise<SessionStateInteraction> {
-        return telemetry.amazonq_codeGenerationInvoke.run(async span => {
+        return telemetry.amazonq_codeGenerationInvoke.run(async (span) => {
             try {
                 span.record({
                     amazonqConversationId: this.config.conversationId,
@@ -324,20 +388,25 @@ export class CodeGenState extends CodeGenBase implements SessionState {
                 )
 
                 action.messenger.sendAnswer({
-                    message: 'Generating code ...',
+                    message: i18n('AWS.amazonq.featureDev.pillText.generatingCode'),
                     type: 'answer-part',
                     tabID: this.tabID,
                 })
 
                 const codeGeneration = await this.generateCode({
+                    messenger: action.messenger,
                     fs: action.fs,
                     codeGenerationId,
                     telemetry: action.telemetry,
                     workspaceFolders: this.config.workspaceFolders,
                 })
+
                 this.filePaths = codeGeneration.newFiles
                 this.deletedFiles = codeGeneration.deletedFiles
                 this.references = codeGeneration.references
+                this.codeGenerationRemainingIterationCount = codeGeneration.codeGenerationRemainingIterationCount
+                this.codeGenerationTotalIterationCount = codeGeneration.codeGenerationTotalIterationCount
+
                 action.telemetry.setAmazonqNumberOfReferences(this.references.length)
                 action.telemetry.recordUserCodeGenerationTelemetry(span, this.conversationId)
                 const nextState = new PrepareCodeGenState(
@@ -347,7 +416,9 @@ export class CodeGenState extends CodeGenBase implements SessionState {
                     this.deletedFiles,
                     this.references,
                     this.tabID,
-                    this.currentIteration + 1
+                    this.currentIteration + 1,
+                    this.codeGenerationRemainingIterationCount,
+                    this.codeGenerationTotalIterationCount
                 )
                 return {
                     nextState,
@@ -369,7 +440,11 @@ export class MockCodeGenState implements SessionState {
     public readonly conversationId: string
     public readonly uploadId: string
 
-    constructor(private config: SessionStateConfig, public approach: string, public tabID: string) {
+    constructor(
+        private config: SessionStateConfig,
+        public approach: string,
+        public tabID: string
+    ) {
         this.tokenSource = new vscode.CancellationTokenSource()
         this.filePaths = []
         this.deletedFiles = []
@@ -382,11 +457,11 @@ export class MockCodeGenState implements SessionState {
         // every file retrieved in the same shape the LLM would
         try {
             const files = await collectFiles(
-                this.config.workspaceFolders.map(f => path.join(f.uri.fsPath, './mock-data')),
+                this.config.workspaceFolders.map((f) => path.join(f.uri.fsPath, './mock-data')),
                 this.config.workspaceFolders,
                 false
             )
-            const newFileContents = files.map(f => ({
+            const newFileContents = files.map((f) => ({
                 zipFilePath: f.zipFilePath,
                 fileContent: f.fileContent,
             }))
@@ -417,13 +492,13 @@ export class MockCodeGenState implements SessionState {
                 type: 'system-prompt',
                 followUps: [
                     {
-                        pillText: 'Insert code',
+                        pillText: i18n('AWS.amazonq.featureDev.pillText.insertCode'),
                         type: FollowUpTypes.InsertCode,
                         icon: 'ok' as MynahIcons,
                         status: 'success',
                     },
                     {
-                        pillText: 'Provide feedback to regenerate',
+                        pillText: i18n('AWS.amazonq.featureDev.pillText.provideFeedback'),
                         type: FollowUpTypes.ProvideFeedbackAndRegenerateCode,
                         icon: 'refresh' as MynahIcons,
                         status: 'info',
@@ -446,7 +521,7 @@ export class MockCodeGenState implements SessionState {
 
 export class PrepareCodeGenState implements SessionState {
     public tokenSource: vscode.CancellationTokenSource
-    public readonly phase = 'Codegen'
+    public readonly phase = DevPhase.CODEGEN
     public uploadId: string
     public conversationId: string
     constructor(
@@ -456,7 +531,9 @@ export class PrepareCodeGenState implements SessionState {
         public deletedFiles: DeletedFileInfo[],
         public references: CodeReference[],
         public tabID: string,
-        private currentIteration: number
+        private currentIteration: number,
+        public codeGenerationRemainingIterationCount?: number,
+        public codeGenerationTotalIterationCount?: number
     ) {
         this.tokenSource = new vscode.CancellationTokenSource()
         this.uploadId = config.uploadId
@@ -474,7 +551,7 @@ export class PrepareCodeGenState implements SessionState {
             tabID: this.tabID,
         })
 
-        const uploadId = await telemetry.amazonq_createUpload.run(async span => {
+        const uploadId = await telemetry.amazonq_createUpload.run(async (span) => {
             span.record({
                 amazonqConversationId: this.config.conversationId,
                 credentialStartUrl: AuthUtil.instance.startUrl,

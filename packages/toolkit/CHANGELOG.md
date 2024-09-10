@@ -1,3 +1,48 @@
+## 3.23.0 2024-09-05
+
+- **Bug Fix** Network errors causing premature SSO logout
+- **Bug Fix** Fix SyntaxError causing premature expiration (edge case)
+
+## 3.22.0 2024-08-29
+
+- **Bug Fix** Auth: `SyntaxError` causing unexpected SSO logout
+- **Bug Fix** Auth: Users may be silently logged out due to network issues when starting the extension.
+
+## 3.21.0 2024-08-22
+
+- **Bug Fix** Various backend fixes
+
+## 3.17.0 2024-07-29
+
+- **Bug Fix** FileNotFound error causing early SSO expiration
+
+## 3.16.0 2024-07-25
+
+- **Bug Fix** AccessAnalyzer: error when running CheckNoPublicAccess with only role trust policy in template
+
+## 3.15.0 2024-07-18
+
+- **Bug Fix** Unexpected SSO expiration on Windows due to EPERM
+
+## 3.14.0 2024-07-11
+
+- **Bug Fix** App composer generate suggestion unclickable when logged in
+- **Bug Fix** AD/LDAP users may see "uv_os_get_passwd ENOENT" error on startup #5277
+
+## 3.13.0 2024-07-08
+
+- **Bug Fix** Add warning message for drag and drop bug on VS Code 1.91.0
+- **Feature** CodeCatalyst: always show Dev Environment timeout warning as modal prompt
+
+## 3.12.0 2024-06-27
+
+- **Bug Fix** Step functions language server activates when editing ASL documents from previous session
+- **Bug Fix** Step functions language server activation fails
+
+## 3.11.0 2024-06-21
+
+- **Removal** Auth: No longer share SSO sessions with Amazon Q.
+
 ## 3.10.0 2024-06-14
 
 - **Bug Fix** UX: Amazon Q continues to install even if users uninstall it.

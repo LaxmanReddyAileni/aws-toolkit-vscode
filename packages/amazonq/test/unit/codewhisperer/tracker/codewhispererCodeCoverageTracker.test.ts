@@ -11,13 +11,12 @@ import {
     vsCodeState,
     TelemetryHelper,
     AuthUtil,
-    userGroupKey,
     UserGroup,
     CodeWhispererUserGroupSettings,
 } from 'aws-core-vscode/codewhisperer'
 import { createMockDocument, createMockTextEditor, resetCodeWhispererGlobalVariables } from 'aws-core-vscode/test'
 import { globals, extensionVersion } from 'aws-core-vscode/shared'
-import { assertTelemetryCurried, FakeMemento } from 'aws-core-vscode/test'
+import { assertTelemetryCurried } from 'aws-core-vscode/test'
 
 describe('codewhispererCodecoverageTracker', function () {
     const language = 'python'
@@ -65,7 +64,6 @@ describe('codewhispererCodecoverageTracker', function () {
     })
 
     describe('test isActive', function () {
-        const fakeMemeto = new FakeMemento()
         let tracker: CodeWhispererCodeCoverageTracker | undefined
 
         afterEach(async function () {
@@ -78,7 +76,7 @@ describe('codewhispererCodecoverageTracker', function () {
             sinon.stub(TelemetryHelper.instance, 'isTelemetryEnabled').returns(true)
             sinon.stub(AuthUtil.instance, 'isConnected').returns(false)
 
-            tracker = CodeWhispererCodeCoverageTracker.getTracker('python', fakeMemeto)
+            tracker = CodeWhispererCodeCoverageTracker.getTracker('python')
             if (!tracker) {
                 assert.fail()
             }
@@ -90,7 +88,7 @@ describe('codewhispererCodecoverageTracker', function () {
             sinon.stub(TelemetryHelper.instance, 'isTelemetryEnabled').returns(false)
             sinon.stub(AuthUtil.instance, 'isConnected').returns(false)
 
-            tracker = CodeWhispererCodeCoverageTracker.getTracker('java', fakeMemeto)
+            tracker = CodeWhispererCodeCoverageTracker.getTracker('java')
             if (!tracker) {
                 assert.fail()
             }
@@ -102,7 +100,7 @@ describe('codewhispererCodecoverageTracker', function () {
             sinon.stub(TelemetryHelper.instance, 'isTelemetryEnabled').returns(true)
             sinon.stub(AuthUtil.instance, 'isConnected').returns(true)
 
-            tracker = CodeWhispererCodeCoverageTracker.getTracker('javascript', fakeMemeto)
+            tracker = CodeWhispererCodeCoverageTracker.getTracker('javascript')
             if (!tracker) {
                 assert.fail()
             }
@@ -524,7 +522,7 @@ describe('codewhispererCodecoverageTracker', function () {
         })
 
         it('should emit correct code coverage telemetry in python file', async function () {
-            await globals.context.globalState.update(userGroupKey, {
+            await globals.globalState.update('CODEWHISPERER_USER_GROUP', {
                 group: UserGroup.Control,
                 version: extensionVersion,
             })
@@ -540,6 +538,7 @@ describe('codewhispererCodecoverageTracker', function () {
                 codewhispererTotalTokens: 100,
                 codewhispererLanguage: language,
                 codewhispererAcceptedTokens: 7,
+                codewhispererSuggestedTokens: 7,
                 codewhispererPercentage: 7,
                 successCount: 1,
                 codewhispererUserGroup: 'Control',
@@ -547,7 +546,7 @@ describe('codewhispererCodecoverageTracker', function () {
         })
 
         it('should emit correct code coverage telemetry when success count = 0', async function () {
-            await globals.context.globalState.update(userGroupKey, {
+            await globals.globalState.update('CODEWHISPERER_USER_GROUP', {
                 group: UserGroup.Control,
                 version: extensionVersion,
             })
@@ -568,6 +567,7 @@ describe('codewhispererCodecoverageTracker', function () {
                 codewhispererTotalTokens: 30,
                 codewhispererLanguage: 'java',
                 codewhispererAcceptedTokens: 18,
+                codewhispererSuggestedTokens: 18,
                 codewhispererPercentage: 60,
                 successCount: 2,
                 codewhispererUserGroup: 'Control',

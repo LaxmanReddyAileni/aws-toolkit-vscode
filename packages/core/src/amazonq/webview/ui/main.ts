@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { Connector } from './connector'
-import { ChatItem, ChatItemType, MynahUI, MynahUIDataModel, NotificationType } from '@aws/mynah-ui'
+import { ChatItem, ChatItemType, MynahIcons, MynahUI, MynahUIDataModel, NotificationType } from '@aws/mynah-ui'
 import { ChatPrompt } from '@aws/mynah-ui/dist/static'
 import { TabsStorage, TabType } from './storages/tabsStorage'
 import { WelcomeFollowupType } from './apps/amazonqCommonsConnector'
@@ -22,8 +22,18 @@ export const createMynahUI = (ideApi: any, amazonQEnabled: boolean) => {
     let mynahUI: MynahUI
     // eslint-disable-next-line prefer-const
     let connector: Connector
+
+    window.addEventListener('error', (e) => {
+        const { error, message } = e
+        ideApi.postMessage({
+            type: 'error',
+            event: connector.isUIReady ? 'webview_error' : 'webview_load',
+            errorMessage: error ? error.toString() : message,
+        })
+    })
+
     const tabsStorage = new TabsStorage({
-        onTabTimeout: tabID => {
+        onTabTimeout: (tabID) => {
             mynahUI.addChatItem(tabID, {
                 type: ChatItemType.ANSWER,
                 body: 'This conversation has timed out after 48 hours. It will not be saved. Start a new conversation.',
@@ -163,7 +173,7 @@ export const createMynahUI = (ideApi: any, amazonQEnabled: boolean) => {
             })
             tabsStorage.updateTabStatus(tabID, 'free')
         },
-        sendMessageToExtension: message => {
+        sendMessageToExtension: (message) => {
             ideApi.postMessage(message)
         },
         onChatAnswerUpdated: (tabID: string, item: ChatItem) => {
@@ -239,8 +249,8 @@ export const createMynahUI = (ideApi: any, amazonQEnabled: boolean) => {
                 type: ChatItemType.ANSWER,
                 fileList: {
                     rootFolderTitle: 'Changes',
-                    filePaths: filePaths.map(i => i.zipFilePath),
-                    deletedFiles: deletedFiles.map(i => i.zipFilePath),
+                    filePaths: filePaths.map((i) => i.zipFilePath),
+                    deletedFiles: deletedFiles.map((i) => i.zipFilePath),
                     details: getDetails(filePaths),
                     actions: getActions([...filePaths, ...deletedFiles]),
                 },
@@ -316,6 +326,27 @@ export const createMynahUI = (ideApi: any, amazonQEnabled: boolean) => {
             connector.onUpdateTabType(newTabID)
 
             mynahUI.updateStore(newTabID, tabDataGenerator.getTabData(tabType, true))
+        },
+        onOpenSettingsMessage(tabId: string) {
+            mynahUI.addChatItem(tabId, {
+                type: ChatItemType.ANSWER,
+                body: `To add your workspace as context, enable local indexing in your IDE settings. After enabling, add @workspace to your question, and I'll generate a response using your workspace as context.`,
+                buttons: [
+                    {
+                        id: 'open-settings',
+                        text: 'Open settings',
+                        icon: MynahIcons.EXTERNAL,
+                        keepCardAfterClick: false,
+                        status: 'info',
+                    },
+                ],
+            })
+            tabsStorage.updateTabStatus(tabId, 'free')
+            mynahUI.updateStore(tabId, {
+                loadingChat: false,
+                promptInputDisabledState: tabsStorage.isTabDead(tabId),
+            })
+            return
         },
     })
 
