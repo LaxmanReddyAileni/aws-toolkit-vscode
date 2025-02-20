@@ -231,7 +231,7 @@ export function getWorkspaceRelativePath(
         return
     }
     let folders = override.workspaceFolders
-    if (useCase && useCase === FeatureUseCase.TEST_GENERATION) {
+    if (useCase === FeatureUseCase.TEST_GENERATION) {
         // Sort workspace folders by path length (descending) to prioritize deeper paths
         // TODO: Need to enable this for entire Q
         folders = [...override.workspaceFolders].sort((a, b) => b.uri.fsPath.length - a.uri.fsPath.length)
